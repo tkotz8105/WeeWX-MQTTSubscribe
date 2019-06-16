@@ -231,6 +231,16 @@ class TopicManager:
             self.subscribed_topics[topic]['queue'] = deque()
             self.subscribed_topics[topic]['queue_wind'] = deque()
 
+    @property
+    def has_data(self):
+        for topic in self.subscribed_topics:
+            queue = self._get_queue(topic)
+            queue_wind = self._get_wind_queue(topic)
+            if len(queue) > 0 or len(queue_wind) > 0:
+                return True
+
+        return False
+
     def append_data(self, topic, in_data, fieldname=None):
         data = dict(in_data)
         payload = {}
@@ -250,6 +260,25 @@ class TopicManager:
         self.logger.logdbg("MQTTSubscribe", "TopicManager Added to queue %s %s %s: %s" %(topic, self._lookup_topic(topic), weeutil.weeutil.timestamp_to_string(data['dateTime']), to_sorted_string(data)))
         payload['data'] = data
         queue.append(payload,)
+
+    def peek_datetime(self, topic):
+        queue = self._get_queue(topic)
+        self.logger.logdbg("MQTTSubscribe", "TopicManager queue size is: %i" % len(queue))
+        datetime = six.MAXSIZE
+        if len(queue) > 0:
+            datetime = queue[0]['dateTime']
+
+        queue_wind = self._get_wind_queue(topic)
+        self.logger.logdbg("MQTTSubscribe", "TopicManager wind queue size is: %i" % len(queue_wind))
+        datetime_wind = six.MAXSIZE
+        if len(queue_wind) > 0:
+            datetime_wind = queue_wind[0]['dateTime']
+
+        peek_datetime = min(datetime, datetime_wind)
+        if peek_datetime == six.MAXSIZE:
+            return None
+        else:
+            return peek_datetime
 
     def get_data(self, topic, end_ts=six.MAXSIZE):
         queue = self._get_queue(topic)
@@ -519,14 +548,21 @@ class MQTTSubscribe():
         self.client.connect(host, port, keepalive)
 
     @property
+    def has_data(self):
+        return self.manager.has_data
+
+    @property
     def Subscribed_topics(self):
         return self.manager.subscribed_topics
+
+    def peek_datetime(self, topic):
+      return self.manager.peek_datetime(topic)
 
     def get_data(self, topic, end_ts=six.MAXSIZE):
         return self.manager.get_data(topic, end_ts)
 
-    def get_accumulated_data(self, topic, start_ts, end_ts, units):
-        return self.manager.get_accumulated_data(topic, start_ts, end_ts, units)     
+    def get_accumulated_data(self, topic, start_ts, end_ts, units, wait_before_retry=0):
+        return self.manager.get_accumulated_data(topic, start_ts, end_ts, units)  
 
     # start subscribing to the topics
     def start(self):
@@ -689,6 +725,36 @@ class MQTTSubscribeDriver(weewx.drivers.AbstractDevice):
                     yield data
                 else:
                     break
+
+    def genStartupRecords(self, last_ts):
+      # ToDo - use the last_ts when passed in, instead of peeking at the queue
+      self.logger.logdbg("MQTTSubscribeDriver", "Catching up from the persistent subscription.")
+      while not self.subscriber.has_data:
+        self.logger.logdbg("MQTTSubscribeDriver", "Waiting for data to arrive.")
+        time.sleep(1)
+
+      for topic in self.subscriber.Subscribed_topics: # investigate that topics might not be cached.. therefore use subscribed
+        if topic == self.archive_topic:
+            continue
+
+        queued_datetime = self.subscriber.peek_datetime(topic)
+        if queued_datetime:
+            queue_end_ts  =  ((int(queued_datetime / self.archive_interval) + 1) * self.archive_interval)
+            queue_start_ts = queue_end_ts - self.archive_interval
+            todo_units = 1 # ToDo - configure this, because I have no place to retrieve it from
+            current_time = time.time()
+            while queue_end_ts < time.time(): # ToDo - is this the correct condition
+                self.logger.logdbg("MQTTSubscribeDriver", "Processing %f %f %s" %(queue_start_ts, queue_end_ts, weeutil.weeutil.timestamp_to_string(queue_end_ts)))       
+                todo_sleep = .7        # ToDo - configure                     
+                data = self.subscriber.get_accumulated_data(topic, queue_start_ts, queue_end_ts, todo_units)
+                if data:
+                    yield data
+                else:
+                    self.logger.logdbg("MQTTSubscribeDriver", "No data %f %f %s" %(queue_start_ts, queue_end_ts, weeutil.weeutil.timestamp_to_string(queue_end_ts)))
+
+                queue_start_ts = queue_end_ts
+                queue_end_ts = queue_end_ts + self.archive_interval
+                current_time = time.time()
 
 class MQTTSubscribeDriverConfEditor(weewx.drivers.AbstractConfEditor): # pragma: no cover
     @property
