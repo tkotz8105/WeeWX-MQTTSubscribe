@@ -261,24 +261,30 @@ class TopicManager:
         payload['data'] = data
         queue.append(payload,)
 
+    def check_queue_data(self, topic):
+        queue = self._get_queue(topic)
+        if len(queue) > 0:
+            return True
+
+        return False
+
     def peek_datetime(self, topic):
         queue = self._get_queue(topic)
         self.logger.logdbg("MQTTSubscribe", "TopicManager queue size is: %i" % len(queue))
-        datetime = six.MAXSIZE
+        datetime = None
         if len(queue) > 0:
-            datetime = queue[0]['dateTime']
+            datetime = queue[0]['data']['dateTime']
 
-        queue_wind = self._get_wind_queue(topic)
-        self.logger.logdbg("MQTTSubscribe", "TopicManager wind queue size is: %i" % len(queue_wind))
-        datetime_wind = six.MAXSIZE
-        if len(queue_wind) > 0:
-            datetime_wind = queue_wind[0]['dateTime']
+        return datetime
 
-        peek_datetime = min(datetime, datetime_wind)
-        if peek_datetime == six.MAXSIZE:
-            return None
-        else:
-            return peek_datetime
+    def peek_last_datetime(self, topic):
+        queue = self._get_queue(topic)
+        self.logger.logdbg("MQTTSubscribe", "TopicManager queue size is: %i" % len(queue))
+        datetime = 0
+        if len(queue) > 0:
+            datetime = queue[-1]['data']['dateTime']
+
+        return datetime
 
     def get_data(self, topic, end_ts=six.MAXSIZE):
         queue = self._get_queue(topic)
@@ -558,6 +564,9 @@ class MQTTSubscribe():
     def peek_datetime(self, topic):
       return self.manager.peek_datetime(topic)
 
+    def check_queue_data(self, topic):
+        return self.manager.check_queue_data(topic)
+
     def get_data(self, topic, end_ts=six.MAXSIZE):
         return self.manager.get_data(topic, end_ts)
 
@@ -722,35 +731,55 @@ class MQTTSubscribeDriver(weewx.drivers.AbstractDevice):
                 else:
                     break
 
+    # ToDo - configure to turn this on
     def genStartupRecords(self, last_ts):
-      # ToDo - use the last_ts when passed in, instead of peeking at the queue
-      self.logger.logdbg("MQTTSubscribeDriver", "Catching up from the persistent subscription.")
+      todo_sleep = .7 # ToDo - configure
+      todo_max_retries = 1 # ToDo - configure
+      self.logger.logdbg("MQTTSubscribeDriver", "Start catching up from the persistent subscription.")
+      self.logger.logdbg("MQTTSubscribeDriver", "Last good timestamp is: %s" %last_ts)
       while not self.subscriber.has_data:
         self.logger.logdbg("MQTTSubscribeDriver", "Waiting for data to arrive.")
-        time.sleep(1)
+        time.sleep(1) # TODO
 
       for topic in self.subscriber.Subscribed_topics: # investigate that topics might not be cached.. therefore use subscribed
         if topic == self.archive_topic:
             continue
 
-        queued_datetime = self.subscriber.peek_datetime(topic)
-        if queued_datetime:
+        # wait to see if any data shows up for this topic
+        retry = 1
+        while not self.subscriber.check_queue_data(topic) and retry < todo_max_retries:
+            self.logger.logdbg("MQTTSubscribeDriver", "Wait number %i of %i for queue %s" %(retry, todo_max_retries, topic))
+            sleep(todo_sleep)
+            retry += 1
+
+        if self.subscriber.check_queue_data(topic):
+            if not last_ts:
+                queued_datetime = self.subscriber.peek_datetime(topic)
+                self.logger.logdbg("MQTTSubscribeDriver", "Using timestamp %s from queue %s" %(queued_datetime, topic))
+            else:
+                queued_datetime = last_ts
+
             queue_end_ts  =  ((int(queued_datetime / self.archive_interval) + 1) * self.archive_interval)
             queue_start_ts = queue_end_ts - self.archive_interval
             todo_units = 1 # ToDo - configure this, because I have no place to retrieve it from
             current_time = time.time()
             while queue_end_ts < time.time(): # ToDo - is this the correct condition
-                self.logger.logdbg("MQTTSubscribeDriver", "Processing %f %f %s" %(queue_start_ts, queue_end_ts, weeutil.weeutil.timestamp_to_string(queue_end_ts)))       
-                todo_sleep = .7        # ToDo - configure                     
+                self.logger.logdbg("MQTTSubscribeDriver", "Processing %s queue %f %f %s" %(topic, queue_start_ts, queue_end_ts, weeutil.weeutil.timestamp_to_string(queue_end_ts)))       
+                while self.subscriber.peek_last_datetime(topic) < queue_end_ts:
+                    self.logger.logdbg("MQTTSubscribeDriver", "Waiting for %s queue to backfill." % topic)
+                    sleep(todo_sleep)
+
                 data = self.subscriber.get_accumulated_data(topic, queue_start_ts, queue_end_ts, todo_units)
                 if data:
                     yield data
                 else:
-                    self.logger.logdbg("MQTTSubscribeDriver", "No data %f %f %s" %(queue_start_ts, queue_end_ts, weeutil.weeutil.timestamp_to_string(queue_end_ts)))
+                    self.logger.logdbg("MQTTSubscribeDriver", "No data for queue %s %f %f %s" %(topic, queue_start_ts, queue_end_ts, weeutil.weeutil.timestamp_to_string(queue_end_ts)))
 
                 queue_start_ts = queue_end_ts
                 queue_end_ts = queue_end_ts + self.archive_interval
                 current_time = time.time()
+
+        self.logger.logdbg("MQTTSubscribeDriver", "Finished catching up from the persistent subscription.")
 
 class MQTTSubscribeDriverConfEditor(weewx.drivers.AbstractConfEditor): # pragma: no cover
     @property
