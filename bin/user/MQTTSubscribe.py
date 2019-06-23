@@ -675,6 +675,8 @@ class MQTTSubscribeDriver(weewx.drivers.AbstractDevice):
       console = to_bool(stn_dict.get('console', False))
       self.logger = Logger(console)
 
+      self.startup_ts = time.time()
+
       self.wait_before_retry = float(stn_dict.get('wait_before_retry', 2))
       self._archive_interval = to_int(stn_dict.get('archive_interval', 300))
       self.archive_topic = stn_dict.get('archive_topic', None)
@@ -754,8 +756,8 @@ class MQTTSubscribeDriver(weewx.drivers.AbstractDevice):
             queue_end_ts  =  ((int(queued_datetime / self.archive_interval) + 1) * self.archive_interval)
             queue_start_ts = queue_end_ts - self.archive_interval
             todo_units = 1 # ToDo - configure this, because I have no place to retrieve it from
-            current_time = time.time()
-            while queue_end_ts < time.time(): # ToDo - is this the correct condition
+
+            while queue_end_ts < self.startup_ts: # ToDo - is this the correct condition 
                 self.logger.logdbg("MQTTSubscribeDriver", "Processing %s queue %f %f %s" %(topic, queue_start_ts, queue_end_ts, weeutil.weeutil.timestamp_to_string(queue_end_ts)))       
                 while self.subscriber.peek_last_datetime(topic) < queue_end_ts:
                     self.logger.logdbg("MQTTSubscribeDriver", "Waiting for %s queue to backfill." % topic)
@@ -770,7 +772,6 @@ class MQTTSubscribeDriver(weewx.drivers.AbstractDevice):
 
                 queue_start_ts = queue_end_ts
                 queue_end_ts = queue_end_ts + self.archive_interval
-                current_time = time.time()
 
         for ts in records:
           yield records[ts]
