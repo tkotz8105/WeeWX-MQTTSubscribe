@@ -231,16 +231,6 @@ class TopicManager:
             self.subscribed_topics[topic]['queue'] = deque()
             self.subscribed_topics[topic]['queue_wind'] = deque()
 
-    @property
-    def has_data(self):
-        for topic in self.subscribed_topics:
-            queue = self._get_queue(topic)
-            queue_wind = self._get_wind_queue(topic)
-            if len(queue) > 0 or len(queue_wind) > 0:
-                return True
-
-        return False
-
     def append_data(self, topic, in_data, fieldname=None):
         data = dict(in_data)
         payload = {}
@@ -554,15 +544,14 @@ class MQTTSubscribe():
         self.client.connect(host, port, keepalive)
 
     @property
-    def has_data(self):
-        return self.manager.has_data
-
-    @property
     def Subscribed_topics(self):
         return self.manager.subscribed_topics
 
     def peek_datetime(self, topic):
       return self.manager.peek_datetime(topic)
+
+    def peek_last_datetime(self, topic):
+      return self.manager.peek_last_datetime(topic)
 
     def check_queue_data(self, topic):
         return self.manager.check_queue_data(topic)
@@ -738,12 +727,11 @@ class MQTTSubscribeDriver(weewx.drivers.AbstractDevice):
     # ToDo - configure to turn this on
     def genStartupRecords(self, last_ts):
       todo_sleep = .7 # ToDo - configure
-      todo_max_retries = 1 # ToDo - configure
+      todo_max_retries = 3 # ToDo - configure
       self.logger.logdbg("MQTTSubscribeDriver", "Start catching up from the persistent subscription.")
       self.logger.logdbg("MQTTSubscribeDriver", "Last good timestamp is: %s" %last_ts)
-      while not self.subscriber.has_data:
-        self.logger.logdbg("MQTTSubscribeDriver", "Waiting for data to arrive.")
-        time.sleep(1) # TODO
+
+      records = {}
 
       for topic in self.subscriber.Subscribed_topics: # investigate that topics might not be cached.. therefore use subscribed
         if topic == self.archive_topic:
@@ -753,7 +741,7 @@ class MQTTSubscribeDriver(weewx.drivers.AbstractDevice):
         retry = 1
         while not self.subscriber.check_queue_data(topic) and retry < todo_max_retries:
             self.logger.logdbg("MQTTSubscribeDriver", "Wait number %i of %i for queue %s" %(retry, todo_max_retries, topic))
-            sleep(todo_sleep)
+            time.sleep(todo_sleep)
             retry += 1
 
         if self.subscriber.check_queue_data(topic):
@@ -771,17 +759,21 @@ class MQTTSubscribeDriver(weewx.drivers.AbstractDevice):
                 self.logger.logdbg("MQTTSubscribeDriver", "Processing %s queue %f %f %s" %(topic, queue_start_ts, queue_end_ts, weeutil.weeutil.timestamp_to_string(queue_end_ts)))       
                 while self.subscriber.peek_last_datetime(topic) < queue_end_ts:
                     self.logger.logdbg("MQTTSubscribeDriver", "Waiting for %s queue to backfill." % topic)
-                    sleep(todo_sleep)
+                    time.sleep(todo_sleep)
 
                 data = self.subscriber.get_accumulated_data(topic, queue_start_ts, queue_end_ts, todo_units)
                 if data:
-                    yield data
+                    records[queue_start_ts] = {}
+                    records[queue_start_ts].update(data)
                 else:
                     self.logger.logdbg("MQTTSubscribeDriver", "No data for queue %s %f %f %s" %(topic, queue_start_ts, queue_end_ts, weeutil.weeutil.timestamp_to_string(queue_end_ts)))
 
                 queue_start_ts = queue_end_ts
                 queue_end_ts = queue_end_ts + self.archive_interval
                 current_time = time.time()
+
+        for ts in records:
+          yield records[ts]
 
         self.logger.logdbg("MQTTSubscribeDriver", "Finished catching up from the persistent subscription.")
 
