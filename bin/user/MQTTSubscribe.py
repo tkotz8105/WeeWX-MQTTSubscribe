@@ -877,7 +877,7 @@ if __name__ == '__main__': # pragma: no cover
         parser.add_option("--units", choices=["US", "METRIC", "METRICWX"],
                         help="The default units if not in MQTT payload.",
                         default="US")
-        parser.add_option("--binding", choices=["archive", "loop"],
+        parser.add_option("--binding", choices=["archive", "loop", "startup"],
                         help="The type of binding.",
                         default="archive")
         parser.add_option("--type", choices=["driver", "service"],
@@ -958,6 +958,11 @@ if __name__ == '__main__': # pragma: no cover
                 simulate_driver_archive(driver, record_count, interval, delay)
             elif binding == "loop":
                 simulate_driver_packet(driver, record_count)
+            elif binding == "startup":
+                generator = driver.genStartupRecords
+                for record in generator(None):
+                    print("*** %s %s" % (weeutil.weeutil.timestamp_to_string(record['dateTime']), weeutil.weeutil.to_sorted_string(record)))
+                print("done")
 
     def simulate_driver_archive(driver, record_count, interval, delay):
         i = 0
