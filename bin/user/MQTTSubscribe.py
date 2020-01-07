@@ -152,8 +152,8 @@ Configuration:
         # between the driver creating packets is large and the MQTT broker publishes frequently.
         # Or if subscribing to 'individual' payloads with wildcards. This results in many topic
         # in a single queue.
-        # Default is: sys.maxsize for python 3 and sys.maxint for python 2
-        max_queue = MAXSIZE
+        # Default is: six.MAXSIZE
+        max_queue = six.MAXSIZE
 
         [[[first/topic]]]
         [[[second/one]]]
@@ -165,25 +165,18 @@ import datetime
 import json
 import random
 import re
-import sys
 import time
 from collections import deque
 
 import configobj
 import paho.mqtt.client as mqtt
+import six
 
 import weewx
 import weewx.drivers
 from weewx.engine import StdService
 import weeutil
 from weeutil.weeutil import to_bool, to_float, to_int, to_sorted_string
-
-# Stole from six module. Added to eliminate dependency on six when running under WeeWX 3.x
-PY2 = sys.version_info[0] == 2
-if PY2:
-    MAXSIZE = sys.maxint # (only a python 3 error) pylint: disable=no-member
-else:
-    MAXSIZE = sys.maxsize
 
 try:
     import weeutil.logger
@@ -285,7 +278,7 @@ class TopicManager(object):
             raise ValueError("MQTTSubscribe: Unknown unit system: %s" % default_unit_system_name)
         unit_system = weewx.units.unit_constants[default_unit_system_name]
 
-        max_queue = config.get('max_queue', MAXSIZE)
+        max_queue = int(config.get('max_queue', six.MAXSIZE))
 
         self.wind_fields = ['windGust', 'windGustDir', 'windDir', 'windSpeed']
 
@@ -327,6 +320,9 @@ class TopicManager(object):
     def append_data(self, topic, in_data, fieldname=None):
         """ Add the MQTT data to the queue. """
         data = dict(in_data)
+        for key in data:
+            if key != 'dateTime':
+                data[key]=to_float(data[key])
         payload = {}
         payload['wind_data'] = False
         if fieldname in self.wind_fields:
@@ -346,11 +342,17 @@ class TopicManager(object):
         if datetime_format and 'dateTime' in data:
             data['dateTime'] = self._to_epoch(data['dateTime'], datetime_format, self._get_value('offset_format', topic))
 
-        self.logger.debug("TopicManager Added to queue %s %s %s: %s"
+        data['dateTime'] = to_int(data['dateTime'])
+        # if type(data['dateTime']) is str:
+        #     data['dateTime'] = int(float(data['dateTime']))
+        # td = data['dateTime']
+        # self.logger.info(weeutil.weeutil.timestamp_to_string(data['dateTime']))
+        self.logger.info("TopicManager Added to queue %s %s %s: %s"
                           %(topic, self._lookup_topic(topic),
-                            weeutil.weeutil.timestamp_to_string(data['dateTime']), to_sorted_string(data)))
+                            # weeutil.weeutil.timestamp_to_string(td), to_sorted_string(data)))
+                            weeutil.weeutil.timestamp_to_string(data['dateTime']), to_sorted_string(data)))                            
         payload['data'] = data
-        queue.append(payload,)
+        queue.append(payload)
 
     def peek_datetime(self, topic):
         """ Return the date/time of the first element in the queue. """
@@ -372,7 +374,7 @@ class TopicManager(object):
 
         return datetime_value
 
-    def get_data(self, topic, end_ts=MAXSIZE):
+    def get_data(self, topic, end_ts=six.MAXSIZE):
         """ Get data off the queue of MQTT data. """
         queue = self._get_queue(topic)
         self.logger.debug("TopicManager starting queue %s size is: %i" %(topic, len(queue)))
@@ -452,7 +454,7 @@ class TopicManager(object):
         return target_data
 
     def _queue_size_check(self, queue, max_queue):
-        while len(queue) >= max_queue:
+           while len(queue) >= max_queue:
             element = queue.popleft()
             self.logger.error("TopicManager queue limit %i reached. Removing: %s" %(max_queue, element))
 
@@ -561,7 +563,7 @@ class MessageCallbackProvider(object):
                         yield key + separator + subkey, subvalue
                 else:
                     yield key, value
-
+       
         return dict(_items())
 
     def _log_message(self, msg):
@@ -577,7 +579,7 @@ class MessageCallbackProvider(object):
         try:
             self._log_message(msg)
 
-            if PY2:
+            if six.PY2:
                 payload_str = msg.payload
             else:
                 payload_str = msg.payload.decode('utf-8')
@@ -609,18 +611,20 @@ class MessageCallbackProvider(object):
     def _on_message_json(self, client, userdata, msg): # (match callback signature) pylint: disable=unused-argument
         # Wrap all the processing in a try, so it doesn't crash and burn on any error
         try:
+            data = {}
             self._log_message(msg)
-
+  
             # JSON string objects are decoded into unicode in python 2 and str in python 3
-            if PY2:
+            if six.PY2:
                 data = self._byteify(
                     json.loads(msg.payload, object_hook=self._byteify),
                     ignore_dicts=True)
             else:
-                data = json.loads(msg.payload.decode("utf-8"))
-
+                tdata = json.loads(msg.payload.decode("utf-8"))
+                for key in tdata:
+                    data[self.label_map.get(key, key)] = tdata[key]   # could put to_float here
             self.topic_manager.append_data(msg.topic, self._flatten_dict(data, self.flatten_delimiter))
-
+ 
         except Exception as exception: # (want to catch all) pylint: disable=broad-except
             self._log_exception('on_message_json', exception, msg)
 
@@ -634,14 +638,14 @@ class MessageCallbackProvider(object):
                 key = msg.topic
             else:
                 key = msg.topic.rpartition('/')[2]
-
-            if PY2:
+  
+            if six.PY2:
                 key = key.encode('utf-8')
 
             fieldname = self.label_map.get(key, key)
 
             data = {}
-            data[fieldname] = to_float(msg.payload) # ToDo - a bit lazy and dangerous, assuming all incoming is a float
+            data[fieldname] = to_float(msg.payload.decode()) # ToDo - a bit lazy and dangerous, assuming all incoming is a float
 
             self.topic_manager.append_data(msg.topic, data)
         except Exception as exception: # (want to catch all) pylint: disable=broad-except
@@ -732,7 +736,7 @@ class MQTTSubscribe(object):
         """ The topics subscribed to. """
         return self.manager.subscribed_topics
 
-    def get_data(self, topic, end_ts=MAXSIZE):
+    def get_data(self, topic, end_ts=six.MAXSIZE):
         """ Get data off the queue of MQTT data. """
         return self.manager.get_data(topic, end_ts)
 
@@ -995,7 +999,8 @@ class MQTTSubscribeDriverConfEditor(weewx.drivers.AbstractConfEditor): # pragma:
 if __name__ == '__main__': # pragma: no cover
     import optparse
     import os
-    import syslog #pylint: disable=ungrouped-imports
+    import sys
+    import syslog
     from weewx.engine import StdEngine # pylint: disable=ungrouped-imports
 
     USAGE = """MQTTSubscribeService --help
@@ -1065,10 +1070,8 @@ if __name__ == '__main__': # pragma: no cover
 
         if options.topics:
             topics = options.topics.split(',')
-            if 'MQTTSubscribeService' in config_dict and 'topics' in config_dict['MQTTSubscribeService']:
-                config_dict['MQTTSubscribeService']['topics'] = {}
-            if 'MQTTSubscribeDriver' in config_dict and 'topics' in config_dict['MQTTSubscribeDriver']:
-                config_dict['MQTTSubscribeDriver']['topics'] = {}
+            config_dict['MQTTSubscribeService']['topics'] = {}
+            config_dict['MQTTSubscribeDriver']['topics'] = {}
             for topic in topics:
                 weeutil.config.merge_config(config_dict,
                                             {'MQTTSubscribeService': {'topics': {topic:{}}}})
